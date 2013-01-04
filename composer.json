@@ -1,5 +1,25 @@
 {
     "name": "erobin/hoodlib",
+    "description": "PHP 5.3+ eRobin Helper Class",
+    "keywords": ["eRobin", "laravel"],
+    "license": "BSD License (3-clause)",
+    "authors": [
+        {
+            "name": "eRobin",
+            "email": "acr@antoniocarlosribeiro.com"
+        }
+    ],
     "require": {
-    }
+        "php": ">=5.3.0"
+    },
+    "require-dev": {
+    },
+    "suggest": {
+    },
+    "autoload": {
+    	"classmap": [
+            "src/HoodLib.php"
+    	]
+    },
+    "minimum-stability": "dev"
 }
