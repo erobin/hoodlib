@@ -19,6 +19,7 @@
     "autoload": {
     	"classmap": [
             "src/HoodLib.php"
+            "src/Translator.php"
     	]
     },
     "minimum-stability": "dev"
