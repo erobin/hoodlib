@@ -2,177 +2,263 @@
 
 namespace eRobin 
 { 
-    class Translator
-    {
-        public $languages = array();
-        public $messages = array();
-        public $did = false;
+	class Translator
+	{
+		const DEFAULT_LANGUAGE_ID = 'en';
+		const DEFAULT_COUNTRY_ID = 'US';
 
-        private $defaultLanguageID = 'en';
-        private $defaultCountryID = 'US';
+		public $variableDelimiterPrefix = '|-';
+		public $variableDelimiterSuffix = '-|';
 
-        private $currentLanguageID;
-        private $currentCountryID;
+		public $languages = array();
+		public $messages = array();
 
-        function __construct() 
-        {
-          $this->loadLanguages(); /// load the list of enabled/disabled languages
-          $this->loadMessages(); /// load the list of enabled/disabled languages
-        }
+		private $currentLanguageID;
+		private $currentCountryID;
+		private $did;
 
-        public function translate($message, $languageID = '', $countryID = '', $module = 0) 
-        {
-            $this->then = microtime(true);
+		function __construct() 
+		{
+			$this->loadLanguages();
+			$this->loadMessages();
+		}
 
-          if (empty($languageID)) {
-                $languageID = Session::get('language_id');
-                $countryID = Session::get('country_id');
-          }
+		static function translate($messages, $module = 0, $replacements)
+		{
+			if (\Auth::check()) {
+				$language = \Auth::user()->language_id;
+				$country = \Auth::user()->country_id;
+			} else {
+				$language = \Session::get('languageID');
+				$country = \Session::get('countryID');
+			}
 
-          if ( !isset($this->languages[$languageID."-".$countryID]) ) { /// if the language is not enabled in the system, use default
-            $languageID = $this->defaultLanguageID;
-            $countryID = $this->defaultCountryID;
-          }
+			$translator = \App::make('erobin.translator');
+			$translated = $translator->translateMessages($messages, $language, $country, $module);
 
-          $this->removePrefixAndSufix($message, $prefix, $sufix); /// spaces and punctuation before and after should not be translated
+			foreach($replacements as $key => $string) {
+				$translated = str_replace(static::variableDelimiterPrefix()."$key".static::variableDelimiterSuffix(), $string, $translated);
+			}
 
-          $ret = $prefix . $this->__translate($message, $languageID, $countryID, $module) . $sufix;
+			return ($translator->debug() ? '{' : '').$translated.($translator->debug() ? '}' : '');
+		}
 
-          if (!isset($ret) or Empty($ret)) {
-            $ret = $message; /// no empty messages, ever
-          }
+		public function translateMessages($messages, $languageID, $countryID, $module) {
+			$this->removePrefixAndSuffix($messages, $prefix, $suffix);
+			$m = explode(".", $messages);
+			foreach($m as $key => $message) {
+				$this->removePrefixAndSuffix($message, $messagePrefix, $messageSuffix); /// spaces and punctuation before and after should not be translated
 
-          return $ret;
-        }
+				$m[$key] = $messagePrefix . $this->translateMessage($message, $languageID, $countryID, $module) . $messageSuffix;
+			}
+			$messages = $prefix . implode(".",$m) . $suffix;
+			return $messages;
+		}
 
-        private function __translate($message, $languageID, $countryID, $module) 
-        {
-            $hash = SHA1($message);
+		private function translateMessage($message, $languageID, $countryID, $module)
+		{
+			$this->setCurrentLanguage($languageID, $countryID);
 
-            $messageID = $this->buildMessageID($hash, $this->defaultLanguageID, $this->defaultCountryID, $module);
-            $originalMessage = $this->getMessage($messageID);
-            if (!isset($originalMessage) or empty($originalMessage)) {
-                $this->newMessage($messageID, $this->defaultLanguageID, $this->defaultCountryID, $module, $hash, $message);
-            }
+			$hash = SHA1($message);
+			$messageID = $this->buildMessageID($hash, $this->getDefaultLanguage(), $this->getDefaultCountry(), $module);
+			$originalMessage = $this->getMessage($messageID);
 
-            if (!$this->isDefaultLanguage($languageID, $countryID)) {
-                $messageID = $this->buildMessageID($hash, $languageID, $countryID, $module);
-                $translatedMessage = $this->getMessage($messageID);
-                if ( isset($translatedMessage) and !empty($translatedMessage) ) {
-                    return $translatedMessage;
-                }
-                Log::log("not found = $message - $hash - $messageID");
-                $this->newMessage($messageID, $languageID, $countryID, $module, $hash, $message);
-            }
+			if (!isset($originalMessage) or empty($originalMessage)) {
+				$this->newMessage($messageID, $this->getDefaultLanguage(), $this->getDefaultCountry(), $module, $hash, $message);
+			}
 
-            return $message;
-        }
+			if (!$this->isDefaultLanguage($languageID, $countryID)) {
+				$messageID = $this->buildMessageID($hash, $this->currentLanguageID, $this->currentCountryID, $module);
+				$translatedMessage = $this->getMessage($messageID);
+				if ( isset($translatedMessage) and !empty($translatedMessage) ) {
+					return $translatedMessage;
+				}
+				\Log::warning("not found = $message - $hash - $messageID");
+				$this->newMessage($messageID, $this->currentLanguageID, $this->currentCountryID, $module, $hash, $message);
+			}
 
-        private function newMessage($messageID, $languageID, $countryID, $module, $hash, $message) {
-            $model = new Message;
-            $model->language_id = $languageID;
-            $model->country_id = $countryID;
-            $model->module_id = $module;
-            $model->message_hash = $hash; // this hash is the untranslated form of the message
-            $model->message = $message; // this is the message already translated
-            $model->save();
-            $result = $message;
-            $this->setMessage($messageID,$message);
-        }
-        
-        private function isDefaultLanguage($lID, $cCode) {
-            return ($lID == $this->defaultLanguageID) and ($cCode = $this->defaultCountryID);
-        }
+			return $message;
+		}
 
-        private function loadLanguages() {
-            $query = DB::query("select cl.language_id, cl.country_id , l.name language_name , c.name country_name , concat(l.name,' (', c.name, ')') as regional_name, cl.enabled  from country_languages cl  join languages l on l.id = cl.language_id  join countries c on c.id = cl.country_id;");
-                                             
-            foreach ($query as $record) {
-                $this->languages[$record->language_id."-".$record->country_id] = array(
-                                                                'language_id' => $record->language_id
-                                                            , 'country_id' => $record->country_id
-                                                            , 'language_name' => $record->language_name
-                                                            , 'country_name' => $record->country_name
-                                                            , 'regional_name' => $record->regional_name
-                                                            , 'enabled' => $record->enabled
-                                                        );
-            }
-        }
+		private function newMessage($messageID, $languageID, $countryID, $module, $hash, $message) {
+			try 
+			{
+				$model = new \Message;
+				$model->language_id = $languageID;
+				$model->country_id = $countryID;
+				$model->module_id = $module;
+				$model->message_hash = $hash; // this hash is the untranslated form of the message
+				$model->message = $message; // this is the message already translated
+				$model->save();
+				$result = $message;
+			} 
+			catch (\Exception $e) {
+				dd($e);
+			}
+			$this->setMessage($messageID,$message);
+		}
+		
+		private function isDefaultLanguage($lID, $cID) {
+			return ($lID == $this->getDefaultLanguage()) and ($cID = $this->getDefaultCountry());
+		}
 
-        private function loadMessages() {
-            $this->messages = array();    
-            
-            $query = DB::table('messages')->where_language_id($this->defaultLanguageID)->where_country_id($this->defaultCountryID)->get();
-            foreach ($query as $record) {
-              $messageID = $this->buildMessageID($record->message_hash, $record->language_id, $record->country_id, $record->module_id);
-              $this->messages[$messageID] = $record->message;
-            }
+		private function loadLanguages() {
+			$query = \DB::select("select cl.language_id, cl.country_id , l.name language_name , c.name country_name , concat(l.name,' (', c.name, ')') as regional_name, cl.enabled  from countries_languages cl  join languages l on l.id = cl.language_id  join countries c on c.id = cl.country_id;");
+			
+			foreach ($query as $record) {
+					$this->languages[$record->language_id."-".$record->country_id] = array(
+																							  'language_id' => $record->language_id
+																							, 'country_id' => $record->country_id
+																							, 'language_name' => $record->language_name
+																							, 'country_name' => $record->country_name
+																							, 'regional_name' => $record->regional_name
+																							, 'enabled' => $record->enabled
+																					);
+			}
+		}
 
-            $query = DB::table('messages')->where_language_id(Session::get('language_id'))->where_country_id(Session::get('country_id'))->get();
-            foreach ($query as $record) {
-                $messageID = $this->buildMessageID($record->message_hash, $record->language_id, $record->country_id, $record->module_id);
-                $this->messages[$messageID] = $record->message;
-            }
-        }
+		private function loadMessages() {
+			$this->messages = array();    
+			
+			$query = \DB::table('messages')->where('language_id', '=', $this->getDefaultLanguage())->where('country_id','=', $this->getDefaultCountry())->get();
+			foreach ($query as $record) {
+				$messageID = $this->buildMessageID($record->message_hash, $record->language_id, $record->country_id, $record->module_id);
+				$this->messages[$messageID] = $record->message;
+			}
 
-        private function removePrefixAndSufix(&$message, &$prefix, &$sufix) {
-          $prefix = '';
-          $sufix = '';
-          
-          $chars = array( "!"=>1,"\\"=>1,"\""=>1,"#"=>1,"\$"=>1,"%"=>1,"&"=>1,"'"=>1,"("=>1,")"=>1,"*"=>1,"+"=>1,","=>1,"-"=>1,"."=>1,"/"=>1,":"=>1,";"=>1,"<"=>1,"="=>1,">"=>1,"?"=>1,"@"=>1,"["=>1,"]"=>1,"^"=>1,"_"=>1,"`"=>1,"{"=>1,"|"=>1," "=>1,"}"=>1 );
+			$query = \DB::table('messages')->where('language_id', '=', $this->currentLanguageID)->where('country_id','=', $this->currentCountryID)->get();
+			foreach ($query as $record) {
+				$messageID = $this->buildMessageID($record->message_hash, $record->language_id, $record->country_id, $record->module_id);
+				$this->messages[$messageID] = $record->message;
+			}
+		}
 
-          $i = 0;
-          while ($i < strlen($message) and isset($chars[$message[$i]])) {
-              $prefix .= $message[$i];
-              $i++;
-          }
-          $i = strlen($message)-1;
-          while ($i > -1 and isset($chars[$message[$i]])) {
-              $sufix = $message[$i] . $sufix;
-              $i--;
-          }
+		private function removePrefixAndSuffix(&$message, &$prefix, &$suffix) {
+			$prefix = '';
+			$suffix = '';
+			
+			$chars = array( "!"=>1,"\\"=>1,"\""=>1,"#"=>1,"\$"=>1,"%"=>1,"&"=>1,"'"=>1,"("=>1,")"=>1,"*"=>1,"+"=>1,","=>1,"-"=>1,"."=>1,"/"=>1,":"=>1,";"=>1,"<"=>1,"="=>1,">"=>1,"?"=>1,"@"=>1,"["=>1,"]"=>1,"^"=>1,"_"=>1,"`"=>1,"{"=>1,"|"=>1," "=>1,"}"=>1 );
 
-          $message = substr($message,strlen($prefix));
-          $message = substr($message,0,strlen($message)-strlen($sufix));
-        }
+			$i = 0;
+			while ($i < strlen($message) and isset($chars[$message[$i]])) {
+				$prefix .= $message[$i];
+				$i++;
+			}
+			$i = strlen($message)-1;
+			while ($i > -1 and isset($chars[$message[$i]])) {
+				$suffix = $message[$i] . $suffix;
+				$i--;
+			}
 
-        private function buildMessageID($hash, $languageID, $countryID, $module) {
-            return SHA1("$hash, $languageID, $countryID, $module");
-        }
-        
-        private function getMessage($messageID) {
-            if (!isset($this->messages[$messageID])) {
-                Log::log("not found! |$messageID|");
-                if (!$this->did) {
-                    foreach($this->messages as $key => $data) {
-                        Log::log("$key => $data");
-                    }
-                    $this->did = true;  
-                }
-                foreach($this->messages as $key => $message) {
-                    if ($key == $messageID) {
-                        Log::log("FOUND! |$key| == |$messageID|");
-                    }
-                }
-            }
+			if ($prefix != $this->variableDelimiterPrefix) {
+				$message = substr($message,strlen($prefix));	
+			} else {
+				$prefix = "";
+			}
+			
+			if ($suffix != $this->variableDelimiterSuffix) {
+				$message = substr($message,0,strlen($message)-strlen($suffix));
+			} else {
+				$suffix = "";
+			}
+		}
 
-            return isset($this->messages[$messageID]) ? $this->messages[$messageID] : NULL;
-        }
-        
-        private function setMessage($messageID,$message) {
-            return $this->messages[$messageID] = $message;
-        }
-        
-    }
+		private function buildMessageID($hash, $languageID, $countryID, $module) {
+			return SHA1("$hash, $languageID, $countryID, $module");
+		}
+		
+		private function getMessage($messageID) {
+			if (!isset($this->messages[$messageID])) {
+				\Log::warning("not found! |$messageID|");
+				if (!$this->did) {
+					foreach($this->messages as $key => $data) {
+						\Log::warning("$key => $data");
+					}
+					$this->did = true;  
+				}
+				foreach($this->messages as $key => $message) {
+					if ($key == $messageID) {
+						\Log::warning("FOUND! |$key| == |$messageID|");
+					}
+				}
+			}
 
-    /// This is a helper function for translation
+			return isset($this->messages[$messageID]) ? $this->messages[$messageID] : NULL;
+		}
+		
+		private function setMessage($messageID,$message) {
+			return $this->messages[$messageID] = $message;
+		}
 
-    function t($message, $language = null, $country = null, $module = 0)
-    {
-        $translator = IoC::resolve('translator');
-        $debug = false;
-        return ($debug ? '{' : '').$translator->translate($message, $language, $country, $module).($debug ? '}' : '');
-    }
+		private function getLanguages() {
+			if(!isset($this->languages))  {
+				$this->loadLanguages();
+			}
+			return $this->languages;
+		}
 
+		static function languages()
+		{
+			$translator = \App::make('erobin.translator');
+			return $translator->getLanguages();
+		}
+
+		static function languageName($language_id, $country_id) {
+			$translator = \App::make('erobin.translator');
+			return $translator->languages[$language_id."-".$country_id]['regional_name'];
+		}
+
+		public function debug() {
+			return \Config::get('app.debugTranslation');
+		}
+
+		private function getDefaultLanguage() {
+			$l = \Config::get('app.defaultLanguage');
+			if (!isset($l) or empty($l)) {
+				$l = self::DEFAULT_LANGUAGE_ID;
+			}
+			return $l;
+		}
+
+		private function getDefaultCountry() {
+			$c = \Config::get('app.defaultCountry');
+			if (!isset($c) or empty($c)) {
+				$c = self::DEFAULT_COUNTRY_ID;
+			}
+			return $c;
+		}
+
+		private function setCurrentLanguage($languageID, $countryID) {
+			if (!isset($languageID)) {
+				if (!isset($this->currentLanguageID)) {
+					$languageID = $this->getDefaultLanguage();
+				} else {
+					$languageID = $this->currentLanguageID;
+				}
+			}
+
+			if (!isset($countryID)) {
+				if (!isset($this->currentCountryID)) {
+					$countryID = $this->getDefaultCountry();
+				} else {
+					$countryID = $this->currentCountryID;
+				}
+			}
+
+			if ($this->currentLanguageID != $languageID or $this->currentCountryID != $countryID) {
+				$this->currentLanguageID = $languageID;
+				$this->currentCountryID = $countryID;
+
+				$this->loadMessages();
+			}
+		}
+
+		static function variableDelimiterPrefix() {
+			return \App::make('erobin.translator')->variableDelimiterPrefix;
+		}
+
+		static function variableDelimiterSuffix() {
+			return \App::make('erobin.translator')->variableDelimiterSuffix;
+		}
+	}
 }
- 
